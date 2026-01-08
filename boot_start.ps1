@@ -73,6 +73,30 @@ Write-Output "=== Lierzufang autostart ==="
 Write-Output ("Root: " + $Root)
 Write-Output ("RunRoot: " + $RunRoot)
 
+# Stripe config quick hint (do not print secrets)
+try {
+  $envPath = Join-Path $RunRoot "server\.env"
+  if (Test-Path $envPath) {
+    $envText = (Get-Content -LiteralPath $envPath -Raw)
+    $skLine = ($envText -split "`n" | Where-Object { $_ -match '^\s*STRIPE_SECRET_KEY\s*=' } | Select-Object -First 1)
+    $webLine = ($envText -split "`n" | Where-Object { $_ -match '^\s*WEB_BASE_URL\s*=' } | Select-Object -First 1)
+    $skMode = "unknown"
+    if ($skLine -match 'sk_live_') { $skMode = "live" }
+    elseif ($skLine -match 'sk_test_') { $skMode = "test" }
+    Write-Output ("[INFO] Stripe key mode: " + $skMode + " (from server/.env)")
+    if ($webLine) { Write-Output ("[INFO] WEB_BASE_URL configured") }
+    if ($skMode -eq "test") {
+      Write-Output "[WARN] 当前 Stripe 处于测试模式（Checkout 会显示“沙盒”，真实银行卡会被拒绝）。正式上线请改用 sk_live_ 并配置 Live webhook。"
+      Write-Output "[WARN] 可运行：powershell -ExecutionPolicy Bypass -File server\\scripts\\setup_stripe_live.ps1"
+    }
+  } else {
+    Write-Output "[WARN] 未发现 server/.env（Stripe/登录等配置可能缺失）。"
+    Write-Output "[WARN] 可运行：powershell -ExecutionPolicy Bypass -File server\\scripts\\setup_stripe_live.ps1"
+  }
+} catch {
+  # ignore
+}
+
 # ensure logs dir
 $LogsDir = Join-Path $RunRoot "logs"
 if (!(Test-Path $LogsDir)) { New-Item -ItemType Directory -Path $LogsDir | Out-Null }

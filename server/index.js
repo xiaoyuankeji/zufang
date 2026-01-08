@@ -9,13 +9,18 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const morgan = require('morgan');
 const Landlord = require('./models/Landlord');
+const paymentController = require('./controllers/paymentController');
 
 const app = express();
 
 // Middleware
 app.use(cors());
-app.use(express.json());
 app.use(morgan('dev'));
+
+// Stripe webhook must use raw body and be mounted BEFORE express.json()
+app.post('/api/v1/payments/stripe/webhook', express.raw({ type: 'application/json' }), paymentController.stripeWebhook);
+
+app.use(express.json());
 
 // Health check (dev)
 app.get('/api/v1/health', (req, res) => {

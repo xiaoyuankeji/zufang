@@ -25,6 +25,11 @@ function getWebBaseUrl(req) {
   );
 }
 
+function getWebhookSecret() {
+  const s = String(process.env.STRIPE_WEBHOOK_SECRET || '').trim();
+  return s || null;
+}
+
 exports.topUp = async (req, res, next) => {
   try {
     const { amount, landlordId } = req.body;
@@ -77,7 +82,7 @@ exports.getMyPayments = async (req, res, next) => {
   }
 };
 
-// --- Stripe checkout (test-mode real payment) ---
+// --- Stripe checkout (production-ready flow: final credit should rely on webhook; confirm is for UX) ---
 exports.createStripeCheckoutSession = async (req, res) => {
   try {
     const stripe = getStripe();
@@ -125,7 +130,7 @@ exports.createStripeCheckoutSession = async (req, res) => {
           price_data: {
             currency: 'eur',
             unit_amount: unitAmount,
-            product_data: { name: '账户充值（测试）' }
+            product_data: { name: '账户充值' }
           }
         }
       ],
@@ -155,6 +160,72 @@ exports.createStripeCheckoutSession = async (req, res) => {
       });
     }
     return res.status(400).json({ status: 'fail', message: err?.message || String(err) });
+  }
+};
+
+// Stripe webhook (production source of truth for credit)
+exports.stripeWebhook = async (req, res) => {
+  try {
+    const stripe = getStripe();
+    const whsec = getWebhookSecret();
+    if (!stripe || !whsec) {
+      // Misconfigured: don't break Stripe retries forever, but return 400 so operator notices.
+      return res.status(400).send('stripe webhook not configured');
+    }
+
+    const sig = req.headers['stripe-signature'];
+    if (!sig) return res.status(400).send('missing stripe-signature');
+
+    let event;
+    try {
+      // req.body must be Buffer (express.raw)
+      event = stripe.webhooks.constructEvent(req.body, sig, whsec);
+    } catch (err) {
+      console.warn('[STRIPE][WEBHOOK] signature verify failed:', err?.message || err);
+      return res.status(400).send('signature verification failed');
+    }
+
+    // Handle events
+    if (event.type === 'checkout.session.completed') {
+      const session = event.data.object;
+      const sessionId = String(session.id || '');
+      const paid = session.payment_status === 'paid';
+      const userId = String(session.client_reference_id || '');
+
+      if (paid && sessionId && userId) {
+        const amount = Number(session.amount_total || 0) / 100;
+        if (Number.isFinite(amount) && amount > 0) {
+          const paymentId = session.metadata?.paymentId ? String(session.metadata.paymentId) : null;
+
+          // Idempotency: only credit when transitioning pending -> completed
+          const updated = await Payment.findOneAndUpdate(
+            paymentId ? { _id: paymentId, status: 'pending' } : { transactionId: sessionId, status: 'pending' },
+            {
+              $set: {
+                status: 'completed',
+                amount,
+                currency: String(session.currency || 'eur').toUpperCase(),
+                transactionId: sessionId
+              }
+            },
+            { new: true }
+          );
+
+          if (updated) {
+            await Landlord.findByIdAndUpdate(userId, { $inc: { balance: amount } }, { new: false });
+            console.log(`[STRIPE][WEBHOOK] credited user=${userId} +${amount} sid=${sessionId}`);
+          } else {
+            // Already completed or missing local record
+            console.log(`[STRIPE][WEBHOOK] ignored (already processed?) user=${userId} sid=${sessionId}`);
+          }
+        }
+      }
+    }
+
+    return res.json({ received: true });
+  } catch (err) {
+    console.error('[STRIPE][WEBHOOK] error:', err?.message || err);
+    return res.status(500).send('webhook handler failed');
   }
 };
 

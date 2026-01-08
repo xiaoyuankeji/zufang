@@ -259,15 +259,6 @@ exports.confirmStripeCheckoutSession = async (req, res) => {
       return res.status(400).json({ status: 'fail', message: 'Payment not completed' });
     }
 
-    // Find related payment record
-    let payment = null;
-    if (session.metadata?.paymentId) {
-      payment = await Payment.findById(session.metadata.paymentId);
-    }
-    if (!payment) {
-      payment = await Payment.findOne({ transactionId: session.id });
-    }
-
     const amountFromMeta = Number(session.metadata?.amount);
     const amountFromTotal = Number(session.amount_total || 0) / 100;
     const amount = Number.isFinite(amountFromMeta) && amountFromMeta > 0 ? amountFromMeta : amountFromTotal;
@@ -276,8 +267,25 @@ exports.confirmStripeCheckoutSession = async (req, res) => {
       return res.status(400).json({ status: 'fail', message: 'Invalid paid amount' });
     }
 
-    // Idempotency: if already completed, just return balance
-    if (payment && payment.status === 'completed') {
+    const paymentId = session.metadata?.paymentId ? String(session.metadata.paymentId) : null;
+
+    // PRODUCTION SAFETY:
+    // Make confirm idempotent and safe with webhook by transitioning pending -> completed atomically.
+    // Only if we successfully flip status do we credit balance.
+    const updated = await Payment.findOneAndUpdate(
+      paymentId ? { _id: paymentId, status: 'pending' } : { transactionId: session.id, status: 'pending' },
+      {
+        $set: {
+          status: 'completed',
+          amount,
+          currency: session.currency?.toUpperCase?.() || 'EUR',
+          transactionId: session.id
+        }
+      },
+      { new: true }
+    );
+
+    if (!updated) {
       const landlord = await Landlord.findById(req.user.id);
       return res.status(200).json({
         status: 'success',
@@ -285,34 +293,13 @@ exports.confirmStripeCheckoutSession = async (req, res) => {
       });
     }
 
+    await Landlord.findByIdAndUpdate(req.user.id, { $inc: { balance: amount } }, { new: false });
     const landlord = await Landlord.findById(req.user.id);
-    if (!landlord) return res.status(404).json({ status: 'fail', message: 'Landlord not found' });
-
-    landlord.balance += amount;
-    await landlord.save({ validateBeforeSave: false });
-
-    if (!payment) {
-      payment = await Payment.create({
-        landlord: req.user.id,
-        amount,
-        currency: session.currency?.toUpperCase?.() || 'EUR',
-        type: 'deposit',
-        status: 'completed',
-        transactionId: session.id
-      });
-    } else {
-      payment.amount = amount;
-      payment.currency = session.currency?.toUpperCase?.() || 'EUR';
-      payment.status = 'completed';
-      payment.transactionId = session.id;
-      await payment.save({ validateBeforeSave: false });
-    }
-
     return res.status(200).json({
       status: 'success',
       data: {
-        balance: landlord.balance,
-        paymentId: payment.id
+        balance: landlord?.balance ?? 0,
+        paymentId: updated.id
       }
     });
   } catch (err) {

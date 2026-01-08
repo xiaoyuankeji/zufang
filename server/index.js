@@ -25,6 +25,8 @@ app.use(express.json());
 // Health check (dev)
 app.get('/api/v1/health', (req, res) => {
   const state = mongoose.connection.readyState; // 0=disconnected,1=connected,2=connecting,3=disconnecting
+  const sk = String(process.env.STRIPE_SECRET_KEY || '');
+  const stripeMode = sk.startsWith('sk_live_') ? 'live' : sk.startsWith('sk_test_') ? 'test' : 'unknown';
   res.status(200).json({
     status: 'success',
     data: {
@@ -32,7 +34,9 @@ app.get('/api/v1/health', (req, res) => {
       time: new Date().toISOString(),
       port: process.env.PORT || 3001,
       stripe: {
-        configured: Boolean(process.env.STRIPE_SECRET_KEY)
+        configured: Boolean(process.env.STRIPE_SECRET_KEY),
+        mode: stripeMode,
+        webhookConfigured: Boolean(process.env.STRIPE_WEBHOOK_SECRET)
       },
       mongo: {
         uri: process.env.DATABASE ? 'from_env' : 'default_local',
@@ -106,7 +110,6 @@ const leadRouter = require('./routes/leadRoutes');
 const listingRouter = require('./routes/listingRoutes');
 const paymentRouter = require('./routes/paymentRoutes');
 const adminRouter = require('./routes/adminRoutes');
-const paymentController = require('./controllers/paymentController');
 const uploadController = require('./controllers/uploadController');
 // path is already required above
 

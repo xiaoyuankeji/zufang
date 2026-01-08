@@ -1,0 +1,39 @@
+# --- Secrets ---
+**/.env
+**/.env.*
+!.env.example
+server/.env
+
+# --- Node ---
+node_modules/
+server/node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# --- Logs / Runtime ---
+logs/
+server/logs/
+*.log
+
+# --- Mongo / Data / Binaries ---
+mongo-data/
+mongodb_bin/
+*.wt
+*.lock
+
+# --- Uploads / Generated assets ---
+server/public/uploads/
+
+# --- Archives / Backups ---
+*.zip
+*.7z
+*.rar
+
+# --- Playwright artifacts ---
+server/scripts/stripe_e2e_*.png
+server/scripts/stripe_e2e_*.html
+
+# --- IDE / local browser profiles ---
+.vscode/
+

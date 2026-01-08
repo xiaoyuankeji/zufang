@@ -1,0 +1,1122 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>房东工作台 | 里尔租房</title>
+    <!-- CDN（适配法国网络环境） -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&display=swap');
+        body { font-family: 'Noto Sans SC', sans-serif; background-color: #F3F4F6; }
+        .glass-panel { background: white; border: 1px solid #E5E7EB; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); }
+    </style>
+</head>
+<body>
+    <!-- 防呆：如果用户用 file:// 打开，会导致很多网络/跨域问题 -->
+    <div id="protocol-warning" style="display:none; padding:16px; background:#FEF3C7; border-bottom:1px solid #F59E0B; color:#92400E; font-weight:700;">
+        检测到你正在用 <code>file://</code> 方式打开页面（会导致接口请求失败）。请用本地服务器访问：
+        <a href="http://localhost:3000/landlord.html" style="text-decoration:underline; font-weight:900;">http://localhost:3000/landlord.html</a>
+        <button id="open-local-btn" style="margin-left:12px; padding:6px 10px; border:1px solid #F59E0B; background:#fff; border-radius:8px; cursor:pointer; font-weight:900;">
+          一键打开
+        </button>
+    </div>
+    <script>
+      (function () {
+        try {
+          if (location.protocol === 'file:') {
+            var el = document.getElementById('protocol-warning');
+            if (el) el.style.display = 'block';
+            var btn = document.getElementById('open-local-btn');
+            if (btn) {
+              btn.addEventListener('click', function () {
+                window.location.href = 'http://localhost:3000/landlord.html';
+              });
+            }
+            // 自动跳转（避免用户总是双击文件导致 Failed to fetch）
+            // 给 800ms 让用户看到提示；如果本地服务没开，跳转会失败但不会影响继续查看页面。
+            setTimeout(function () {
+              try { window.location.href = 'http://localhost:3000/landlord.html'; } catch (e) {}
+            }, 800);
+          }
+        } catch (e) {}
+      })();
+    </script>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        // --- API 配置 ---
+        // 强制指向后端 3001 端口，解决 CORS/端口不一致问题
+        const API_URL = 'http://127.0.0.1:3001/api/v1';
+
+        // --- 工具函数：Fetch 封装 (自动带 Token) ---
+        const api = async (endpoint, method = 'GET', body = null) => {
+            const token = localStorage.getItem('token');
+            console.log(`📡 [API Request] ${method} ${endpoint}`);
+            if (token) console.log(`🔑 Token found: ${token.substring(0, 10)}...`);
+            else console.warn("⚠️ No token found in localStorage");
+
+            const headers = {
+                'Content-Type': 'application/json',
+                ...(token && { 'Authorization': `Bearer ${token}` })
+            };
+
+            const config = {
+                method,
+                headers,
+                ...(body && { body: JSON.stringify(body) })
+            };
+
+            try {
+                const url = `${API_URL}${endpoint}`;
+                console.log(`🌐 Full URL: ${url}`);
+                
+                const res = await fetch(url, config);
+                console.log(`📩 [API Response Status] ${res.status}`);
+
+                const data = await res.json();
+                console.log("📦 [API Response Data]", data);
+
+                if (!res.ok) {
+                    console.error("❌ API Error:", data.message);
+                    if (res.status === 401) {
+                        alert("登录已过期，请重新登录");
+                        localStorage.removeItem('token');
+                        localStorage.removeItem('user');
+                        window.location.reload();
+                    }
+                    throw new Error(data.message || 'Request failed');
+                }
+                return data;
+            } catch (err) {
+                console.error("❌ [Network/Logic Error]", err);
+                throw err;
+            }
+        };
+
+        // --- Lucide Icon 组件 ---
+        const LucideIcon = ({ name, size = 24, className = '' }) => {
+            const ref = useRef(null);
+            useEffect(() => {
+                if (ref.current && lucide && lucide.createIcons) {
+                    lucide.createIcons({
+                        icons: { [name]: lucide.icons[name] },
+                        nameAttr: 'data-lucide',
+                        attrs: { class: className, width: size, height: size }
+                    });
+                    const svg = lucide.icons[name]?.toSvg({ class: className, width: size, height: size });
+                    if(svg) ref.current.innerHTML = svg;
+                }
+            }, [name, size, className]);
+            return <span ref={ref} className="inline-flex items-center justify-center"></span>;
+        };
+
+        // --- 登录/注册页面 ---
+        const AuthPage = ({ onLogin }) => {
+            const [isLogin, setIsLogin] = useState(true);
+            const [formData, setFormData] = useState({ email: '', password: '', name: '', wechatId: '' });
+            const [error, setError] = useState('');
+            const [loading, setLoading] = useState(false);
+
+            const handleSubmit = async (e) => {
+                e.preventDefault();
+                setError('');
+                setLoading(true);
+
+                try {
+                    const endpoint = isLogin ? '/auth/login' : '/auth/signup';
+                    const res = await api(endpoint, 'POST', formData);
+                    
+                    if (res.token) {
+                        localStorage.setItem('token', res.token);
+                        localStorage.setItem('user', JSON.stringify(res.data.user));
+                        onLogin(res.data.user);
+                    }
+                } catch (err) {
+                    setError(err.message);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            return (
+                <div className="min-h-screen flex items-center justify-center p-4">
+                    <div className="bg-white rounded-2xl shadow-xl w-full max-w-md p-8">
+                        <h2 className="text-2xl font-bold text-gray-800 mb-2 text-center">
+                            {isLogin ? '房东登录' : '注册房东账号'}
+                        </h2>
+                        <p className="text-gray-500 text-center mb-8">里尔租房 Lierzufang.com</p>
+                        
+                        {error && <div className="bg-red-50 text-red-600 p-3 rounded-lg mb-4 text-sm">{error}</div>}
+
+                        <form onSubmit={handleSubmit} className="space-y-4">
+                            {!isLogin && (
+                                <>
+                                    <input 
+                                        type="text" 
+                                        placeholder="显示昵称"
+                                        className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                                        value={formData.name}
+                                        onChange={e => setFormData({...formData, name: e.target.value})}
+                                        required
+                                    />
+                                    <input 
+                                        type="text" 
+                                        placeholder="微信号 (用于接收通知)"
+                                        className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                                        value={formData.wechatId}
+                                        onChange={e => setFormData({...formData, wechatId: e.target.value})}
+                                        required
+                                    />
+                                </>
+                            )}
+                            <input 
+                                type="email" 
+                                placeholder="电子邮箱"
+                                className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                                value={formData.email}
+                                onChange={e => setFormData({...formData, email: e.target.value})}
+                                required
+                            />
+                            <input 
+                                type="password" 
+                                placeholder="密码"
+                                className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                                value={formData.password}
+                                onChange={e => setFormData({...formData, password: e.target.value})}
+                                required
+                            />
+                            
+                            <button 
+                                type="submit" 
+                                disabled={loading}
+                                className="w-full py-3 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-700 transition-colors disabled:opacity-50"
+                            >
+                                {loading ? '处理中...' : (isLogin ? '登录' : '注册')}
+                            </button>
+                        </form>
+
+                        <div className="mt-6 text-center">
+                            <button 
+                                onClick={() => setIsLogin(!isLogin)}
+                                className="text-blue-600 text-sm hover:underline"
+                            >
+                                {isLogin ? '没有账号？去注册' : '已有账号？去登录'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // --- 房源管理面板 ---
+        const ListingsPanel = ({ userId, onBalanceUpdate }) => {
+            const [listings, setListings] = useState([]);
+            const [isEditing, setIsEditing] = useState(false);
+            const [editData, setEditData] = useState(null);
+            const [promotingId, setPromotingId] = useState(null);
+            
+            // Initial Form State
+            const initialForm = {
+                title: '', price: '', location: '', description: '', tags: '', images: []
+            };
+            const [formData, setFormData] = useState(initialForm);
+            const [uploading, setUploading] = useState(false);
+
+            useEffect(() => {
+                fetchMyListings();
+            }, []);
+
+            const fetchMyListings = async () => {
+                try {
+                    const res = await api('/listings/my');
+                    setListings(res.data.listings);
+                } catch (err) {
+                    console.error(err);
+                }
+            };
+
+            const handleImageUpload = async (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+
+                setUploading(true);
+                const formData = new FormData();
+                formData.append('image', file);
+
+                try {
+                    const token = localStorage.getItem('token');
+                    // 显式使用 API_URL 常量，防止 fetch 使用相对路径
+                    const res = await fetch(`${API_URL}/upload`, {
+                        method: 'POST',
+                        headers: {
+                            'Authorization': `Bearer ${token}`
+                        },
+                        body: formData
+                    });
+                    const data = await res.json();
+                    
+                    if (data.status === 'success') {
+                        setFormData(prev => ({
+                            ...prev,
+                            images: [...(prev.images || []), data.data.url]
+                        }));
+                    } else {
+                        alert('上传失败: ' + data.message);
+                    }
+                } catch (err) {
+                    alert('上传出错');
+                } finally {
+                    setUploading(false);
+                }
+            };
+
+            const handleSubmit = async (e) => {
+                e.preventDefault();
+                try {
+                    // Convert tags string to array
+                    const payload = {
+                        ...formData,
+                        // 支持英文逗号/中文逗号/多空格分隔，避免 tags 变成一个长字符串
+                        tags: String(formData.tags || '')
+                            .split(/[,\uFF0C]+/g)
+                            .map(t => t.trim())
+                            .filter(Boolean)
+                    };
+
+                    if (isEditing) {
+                        await api(`/listings/${editData._id}`, 'PATCH', payload);
+                        alert('更新成功');
+                    } else {
+                        await api('/listings', 'POST', payload);
+                        alert('发布成功');
+                    }
+                    
+                    setIsEditing(false);
+                    setEditData(null);
+                    setFormData(initialForm);
+                    fetchMyListings();
+                } catch (err) {
+                    alert('操作失败: ' + err.message);
+                }
+            };
+
+            const handleEdit = (item) => {
+                setIsEditing(true);
+                setEditData(item);
+                setFormData({
+                    title: item.title,
+                    price: item.price,
+                    location: item.location,
+                    description: item.description || '',
+                    tags: item.tags.join(', '),
+                    images: item.images || []
+                });
+            };
+
+            const handleDelete = async (id) => {
+                if (!confirm('确定删除这个房源吗？此操作不可恢复。')) return;
+                try {
+                    await api(`/listings/${id}`, 'DELETE');
+                    fetchMyListings();
+                } catch (err) {
+                    alert('删除失败');
+                }
+            };
+
+            const handlePromote = async (id) => {
+                if (!confirm('确认花费 10€ 置顶 7 天吗？（演示定价）')) return;
+                setPromotingId(id);
+                try {
+                    const res = await api(`/listings/${id}/promote`, 'POST', { days: 7, price: 10 });
+                    const updated = res.data.listing;
+                    const newBalance = res.data.balance;
+                    setListings(prev => prev.map(l => l._id === id ? updated : l));
+                    if (typeof onBalanceUpdate === 'function') onBalanceUpdate(newBalance);
+                    alert('置顶成功！');
+                } catch (err) {
+                    if (String(err.message || '').includes('Insufficient balance')) {
+                        alert('余额不足，请先充值。');
+                    } else {
+                        alert('置顶失败：' + err.message);
+                    }
+                } finally {
+                    setPromotingId(null);
+                }
+            };
+
+            return (
+                <div className="space-y-8">
+                    {/* 表单区域 */}
+                    <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
+                        <h3 className="text-lg font-bold text-gray-800 mb-4">
+                            {isEditing ? '编辑房源' : '发布新房源'}
+                        </h3>
+                        <form onSubmit={handleSubmit} className="space-y-4">
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <input required type="text" placeholder="房源标题 (如: 里尔一大附近 Studio)" className="p-3 rounded-lg border border-gray-200 w-full" 
+                                    value={formData.title} onChange={e => setFormData({...formData, title: e.target.value})} />
+                                <input required type="number" placeholder="月租 (€)" className="p-3 rounded-lg border border-gray-200 w-full" 
+                                    value={formData.price} onChange={e => setFormData({...formData, price: e.target.value})} />
+                            </div>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <input required type="text" placeholder="位置区域 (如: Lille Sud)" className="p-3 rounded-lg border border-gray-200 w-full" 
+                                    value={formData.location} onChange={e => setFormData({...formData, location: e.target.value})} />
+                                <input type="text" placeholder="标签 (逗号分隔，如: 近地铁, 包网)" className="p-3 rounded-lg border border-gray-200 w-full" 
+                                    value={formData.tags} onChange={e => setFormData({...formData, tags: e.target.value})} />
+                            </div>
+                            <textarea placeholder="详细描述..." className="p-3 rounded-lg border border-gray-200 w-full" rows="3"
+                                value={formData.description} onChange={e => setFormData({...formData, description: e.target.value})}></textarea>
+                            
+                            {/* 图片上传区 */}
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-2">房源图片</label>
+                                <div className="flex flex-wrap gap-4">
+                                    {formData.images.map((url, idx) => (
+                                        <div key={idx} className="relative w-24 h-24 rounded-lg overflow-hidden border border-gray-200 group">
+                                            <img src={`http://127.0.0.1:3001${url}`} alt="Preview" className="w-full h-full object-cover" />
+                                            <button 
+                                                type="button"
+                                                onClick={() => setFormData(prev => ({...prev, images: prev.images.filter((_, i) => i !== idx)}))}
+                                                className="absolute top-1 right-1 bg-red-500 text-white rounded-full p-1 opacity-0 group-hover:opacity-100 transition-opacity"
+                                            >
+                                                <LucideIcon name="x" size={12} />
+                                            </button>
+                                        </div>
+                                    ))}
+                                    <label className="w-24 h-24 flex flex-col items-center justify-center border-2 border-dashed border-gray-300 rounded-lg cursor-pointer hover:border-blue-500 hover:bg-blue-50 transition-colors">
+                                        {uploading ? (
+                                            <span className="text-xs text-gray-500">上传中...</span>
+                                        ) : (
+                                            <>
+                                                <LucideIcon name="plus" size={24} className="text-gray-400" />
+                                                <span className="text-xs text-gray-500 mt-1">上传图片</span>
+                                            </>
+                                        )}
+                                        <input type="file" accept="image/*" className="hidden" onChange={handleImageUpload} disabled={uploading} />
+                                    </label>
+                                </div>
+                            </div>
+
+                            <div className="flex gap-2">
+                                <button type="submit" className="px-6 py-2 bg-blue-600 text-white font-bold rounded-lg hover:bg-blue-700 transition-colors">
+                                    {isEditing ? '保存修改' : '立即发布'}
+                                </button>
+                                {isEditing && (
+                                    <button type="button" onClick={() => { setIsEditing(false); setFormData(initialForm); }} className="px-6 py-2 bg-gray-100 text-gray-600 font-bold rounded-lg">
+                                        取消
+                                    </button>
+                                )}
+                            </div>
+                        </form>
+                    </div>
+
+                    {/* 列表区域 */}
+                    <div>
+                        <h3 className="text-lg font-bold text-gray-800 mb-4">我的房源列表</h3>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            {listings.map(item => (
+                                <div key={item._id} className="bg-white p-4 rounded-xl border border-gray-100 shadow-sm flex justify-between items-start">
+                                    <div>
+                                        <h4 className="font-bold text-gray-900 line-clamp-1">{item.title}</h4>
+                                        <p className="text-blue-600 font-bold">€{item.price}<span className="text-gray-400 text-xs font-normal">/月</span></p>
+                                        <p className="text-xs text-gray-500 mt-1">{item.location} · {(item.tags || []).join(' ')}</p>
+                                        <div className="mt-3 flex flex-wrap gap-2">
+                                            <a
+                                                href={`/listing?id=${encodeURIComponent(item._id)}`}
+                                                target="_blank"
+                                                className="px-3 py-1.5 rounded-lg text-xs font-bold bg-gray-100 text-gray-700 hover:bg-gray-200"
+                                            >
+                                                前台预览
+                                            </a>
+                                            <button
+                                                onClick={() => handleDelete(item._id)}
+                                                className="px-3 py-1.5 rounded-lg text-xs font-bold bg-red-50 text-red-700 hover:bg-red-100 border border-red-200"
+                                            >
+                                                删除
+                                            </button>
+                                            <button
+                                                onClick={() => handlePromote(item._id)}
+                                                disabled={promotingId === item._id}
+                                                className="px-3 py-1.5 rounded-lg text-xs font-bold bg-gradient-to-r from-orange-500 to-red-500 text-white hover:brightness-110 disabled:opacity-50"
+                                            >
+                                                {promotingId === item._id ? '置顶中...' : '置顶 7 天（10€）'}
+                                            </button>
+                                            <span className={`px-3 py-1.5 rounded-lg text-xs font-bold border ${item.reviewStatus === 'approved' ? 'bg-green-50 text-green-700 border-green-200' : item.reviewStatus === 'rejected' ? 'bg-red-50 text-red-700 border-red-200' : 'bg-yellow-50 text-yellow-800 border-yellow-200'}`}>
+                                                {item.reviewStatus === 'approved' ? '已通过审核' : item.reviewStatus === 'rejected' ? '已驳回' : '待审核'}
+                                            </span>
+                                            {item.isPromoted && (
+                                                <span className="px-3 py-1.5 rounded-lg text-xs font-bold bg-yellow-50 text-yellow-700 border border-yellow-200">
+                                                    已置顶{item.promotedUntil ? `至 ${new Date(item.promotedUntil).toLocaleDateString()}` : ''}
+                                                </span>
+                                            )}
+                                        </div>
+                                    </div>
+                                    <div className="flex gap-2">
+                                        <button onClick={() => handleEdit(item)} className="p-2 text-gray-400 hover:text-blue-600">
+                                            <LucideIcon name="edit-2" size={18} />
+                                        </button>
+                                        <button onClick={() => handleDelete(item._id)} className="p-2 text-gray-400 hover:text-red-500">
+                                            <LucideIcon name="trash-2" size={18} />
+                                        </button>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // --- 仪表盘 ---
+        const Dashboard = ({ user, onLogout, onUserUpdate }) => {
+            const [activeTab, setActiveTab] = useState('leads'); // leads, listings, wallet, settings
+            const [leads, setLeads] = useState([]);
+            const [balance, setBalance] = useState(user.balance || 0);
+            const [loading, setLoading] = useState(true);
+            const [payments, setPayments] = useState([]);
+            const [paymentsLoading, setPaymentsLoading] = useState(false);
+            const [topupAmount, setTopupAmount] = useState('50');
+            const [topupLoading, setTopupLoading] = useState(false);
+            const [stripeConfirming, setStripeConfirming] = useState(false);
+            const [stripeConfirmError, setStripeConfirmError] = useState('');
+            const [stripeSessionId, setStripeSessionId] = useState('');
+            const [stripeSyncing, setStripeSyncing] = useState(false);
+            const [stripeSyncMsg, setStripeSyncMsg] = useState('');
+            const [stripeAutoSyncTried, setStripeAutoSyncTried] = useState(false);
+            const [profileForm, setProfileForm] = useState({
+                name: user.name || '',
+                email: user.email || '',
+                wechatId: user.wechatId || ''
+            });
+            const [profileSaving, setProfileSaving] = useState(false);
+
+            useEffect(() => {
+                // user 变化（比如登录/保存后）同步表单
+                setProfileForm({
+                    name: user.name || '',
+                    email: user.email || '',
+                    wechatId: user.wechatId || ''
+                });
+            }, [user?.name, user?.email, user?.wechatId]);
+
+            // 体验优化：进入工作台后主动同步一次“最新余额/资料”，避免“充值成功回跳但仍显示旧余额”
+            useEffect(() => {
+                (async () => {
+                    try {
+                        const res = await api('/auth/me', 'GET');
+                        const fresh = res?.data?.user;
+                        if (fresh && typeof fresh.balance === 'number') {
+                            setBalance(fresh.balance);
+                            localStorage.setItem('user', JSON.stringify(fresh));
+                            if (typeof onUserUpdate === 'function') onUserUpdate(fresh);
+                        }
+                    } catch (e) {
+                        // ignore
+                    }
+                })();
+            }, []);
+
+            useEffect(() => {
+                fetchLeads();
+            }, []);
+
+            useEffect(() => {
+                // 进入钱包页时再拉取（减少无意义请求）
+                if (activeTab === 'wallet') {
+                    fetchPayments();
+                }
+            }, [activeTab]);
+
+            const fetchLeads = async () => {
+                console.log("🚀 开始获取线索列表...");
+                try {
+                    const res = await api('/leads');
+                    console.log("✅ 线索获取成功，数量:", res.data.leads.length);
+                    setLeads(res.data.leads);
+                } catch (err) {
+                    console.error("❌ 获取线索失败:", err);
+                    alert('获取线索失败: ' + err.message);
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            const fetchPayments = async () => {
+                setPaymentsLoading(true);
+                try {
+                    const res = await api('/payments/my');
+                    setPayments(res.data.payments || []);
+                } catch (err) {
+                    alert('获取充值/消费记录失败: ' + err.message);
+                } finally {
+                    setPaymentsLoading(false);
+                }
+            };
+
+            const reconcileStripe = async () => {
+                setStripeSyncMsg('');
+                setStripeSyncing(true);
+                try {
+                    const res = await api('/payments/stripe/reconcile', 'POST', { limit: 200 });
+                    if (typeof res?.data?.balance === 'number') {
+                        setBalance(res.data.balance);
+                        const storedUser = JSON.parse(localStorage.getItem('user') || '{}');
+                        storedUser.balance = res.data.balance;
+                        localStorage.setItem('user', JSON.stringify(storedUser));
+                    }
+                    const s = res?.data?.stats;
+                    if (s) {
+                        setStripeSyncMsg(`已同步：入账 ${s.credited} 笔，失败 ${s.failed} 笔，仍待处理 ${s.pending} 笔。`);
+                        console.log('[Stripe] reconcile stats:', s);
+                    } else {
+                        setStripeSyncMsg('已同步 Stripe 订单。');
+                    }
+                    await fetchPayments();
+                } catch (e) {
+                    setStripeSyncMsg('同步失败：' + (e?.message || '未知错误'));
+                } finally {
+                    setStripeSyncing(false);
+                }
+            };
+
+            // Auto reconcile once when wallet opens and there are pending Stripe deposits
+            useEffect(() => {
+                if (activeTab !== 'wallet') return;
+                if (stripeSyncing) return;
+                if (stripeAutoSyncTried) return;
+                const hasPendingStripe = (payments || []).some(p => p.type === 'deposit' && p.status === 'pending' && String(p.transactionId || '').startsWith('cs_'));
+                if (!hasPendingStripe) return;
+                setStripeAutoSyncTried(true);
+                reconcileStripe();
+            }, [activeTab, paymentsLoading, payments, stripeSyncing, stripeAutoSyncTried]);
+
+            const handleTopUp = async () => {
+                const amount = Number(topupAmount);
+                if (!Number.isFinite(amount) || amount <= 0) {
+                    alert('请输入正确的充值金额');
+                    return;
+                }
+                setTopupLoading(true);
+                try {
+                    // Real Stripe test payment: create checkout session then redirect
+                    const res = await api('/payments/stripe/checkout-session', 'POST', { amount });
+                    const url = res?.data?.url;
+                    const sessionId = res?.data?.sessionId;
+                    if (!url) throw new Error('Stripe session 创建失败（缺少跳转链接）');
+                    // 关键：把 session_id 缓存起来，防止 Stripe 回跳时 query 丢失导致无法入账
+                    try {
+                        if (sessionId) {
+                            localStorage.setItem('stripe_last_session_id', String(sessionId));
+                            localStorage.setItem('stripe_last_amount', String(amount));
+                            localStorage.setItem('stripe_last_ts', String(Date.now()));
+                        }
+                    } catch (e) {}
+                    window.location.href = url;
+                } catch (err) {
+                    alert('充值失败: ' + err.message);
+                } finally {
+                    setTopupLoading(false);
+                }
+            };
+
+            const clearStripeParams = () => {
+                const params = new URLSearchParams(window.location.search);
+                params.delete('stripe_session_id');
+                params.delete('stripe_cancelled');
+                const next = `${window.location.pathname}?${params.toString()}`.replace(/\?$/, '');
+                window.history.replaceState({}, '', next);
+            };
+
+            const confirmStripeSession = async (sessionId, opts = {}) => {
+                const { maxAttempts = 20, intervalMs = 1200 } = opts;
+                setStripeConfirmError('');
+                setStripeConfirming(true);
+                try {
+                    for (let i = 0; i < maxAttempts; i++) {
+                        try {
+                            const res = await api(`/payments/stripe/confirm?session_id=${encodeURIComponent(sessionId)}`, 'GET');
+                            if (typeof res?.data?.balance === 'number') {
+                                setBalance(res.data.balance);
+                                const storedUser = JSON.parse(localStorage.getItem('user') || '{}');
+                                storedUser.balance = res.data.balance;
+                                localStorage.setItem('user', JSON.stringify(storedUser));
+                            }
+                            await fetchPayments();
+                            clearStripeParams();
+                            setStripeSessionId('');
+                            try {
+                                localStorage.removeItem('stripe_last_session_id');
+                                localStorage.removeItem('stripe_last_amount');
+                                localStorage.removeItem('stripe_last_ts');
+                            } catch (e) {}
+                            if (typeof res?.data?.balance === 'number') {
+                                setStripeSyncMsg(`充值已入账，当前余额 €${res.data.balance}`);
+                            }
+                            return { ok: true, res };
+                        } catch (e) {
+                            const msg = String(e?.message || '');
+                            // Stripe 支付成功后，payment_status 可能延迟几秒才变 paid；这种错误需要重试
+                            if (msg.includes('Payment not completed')) {
+                                await new Promise(r => setTimeout(r, intervalMs));
+                                continue;
+                            }
+                            // 其它错误直接抛出
+                            throw e;
+                        }
+                    }
+                    throw new Error('支付已完成但入账确认超时，请稍后点击“重试入账”。');
+                } catch (e) {
+                    setStripeConfirmError(e?.message || '入账确认失败');
+                    return { ok: false, error: e };
+                } finally {
+                    setStripeConfirming(false);
+                }
+            };
+
+            // Stripe return: confirm and credit balance (no webhook required)
+            useEffect(() => {
+                try {
+                    const params = new URLSearchParams(window.location.search);
+                    const tab = params.get('tab');
+                    const sessionId = params.get('stripe_session_id');
+                    const cancelled = params.get('stripe_cancelled');
+                    // UX：回跳时如果带 tab=wallet，自动切换到钱包页；但入账确认不应依赖 tab
+                    if (tab === 'wallet' && activeTab !== 'wallet') setActiveTab('wallet');
+                    if (cancelled === '1') {
+                        // 清理参数
+                        clearStripeParams();
+                        return;
+                    }
+                    // 关键：优先用 URL 的 session_id；如果 URL 丢参，则用本地缓存兜底
+                    let sid = sessionId;
+                    if (!sid) {
+                        try { sid = localStorage.getItem('stripe_last_session_id') || ''; } catch (e) { sid = ''; }
+                    }
+                    if (!sid) return;
+                    if (stripeConfirming) return;
+                    if (stripeSessionId && stripeSessionId === sid) return;
+                    setStripeSessionId(sid);
+                    confirmStripeSession(sid);
+                } catch (e) {}
+            }, [activeTab, stripeConfirming, stripeSessionId]);
+
+            const handleUnlock = async (leadId) => {
+                if (!confirm(`确认花费 1€ 解锁此条线索吗？\n当前余额: ${balance}€`)) return;
+
+                try {
+                    const res = await api(`/leads/${leadId}/unlock`, 'POST');
+                    // 更新本地列表状态
+                    setLeads(leads.map(l => l._id === leadId ? res.data.lead : l));
+                    if (typeof res?.data?.balance === 'number') {
+                        setBalance(res.data.balance);
+                        // 同步本地 user，避免刷新后余额回到旧值
+                        const storedUser = JSON.parse(localStorage.getItem('user') || '{}');
+                        storedUser.balance = res.data.balance;
+                        localStorage.setItem('user', JSON.stringify(storedUser));
+                    } else {
+                        // 兜底：后端未返回 balance 时按 1€ 扣减
+                        setBalance(prev => prev - 1);
+                    }
+                    alert('解锁成功！');
+                } catch (err) {
+                    alert('解锁失败: ' + err.message);
+                    if (err.message.includes('Insufficient balance')) {
+                        setActiveTab('wallet');
+                    }
+                }
+            };
+
+            return (
+                <div className="min-h-screen flex flex-col">
+                    {/* Header */}
+                    <header className="bg-white border-b border-gray-200 px-6 py-4 flex justify-between items-center sticky top-0 z-10">
+                        <div className="flex items-center gap-2">
+                            <div className="bg-blue-600 text-white p-2 rounded-lg font-bold">L</div>
+                            <span className="font-bold text-gray-800 text-lg">房东工作台</span>
+                        </div>
+                        <div className="flex items-center gap-4">
+                            <div className="text-right">
+                                <p className="text-sm font-bold text-gray-800">{user.name}</p>
+                                <p className="text-xs text-gray-500">余额: <span className="text-green-600 font-bold">{balance}€</span></p>
+                            </div>
+                            <button onClick={onLogout} className="text-gray-400 hover:text-red-500">
+                                <LucideIcon name="log-out" size={20} />
+                            </button>
+                        </div>
+                    </header>
+
+                    {/* Navigation Tabs */}
+                    <div className="bg-white border-b border-gray-200 px-6">
+                        <div className="flex gap-6 max-w-6xl mx-auto">
+                            <button 
+                                onClick={() => setActiveTab('leads')}
+                                className={`py-4 font-bold text-sm border-b-2 transition-colors ${activeTab === 'leads' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+                            >
+                                租客线索
+                            </button>
+                            <button 
+                                onClick={() => setActiveTab('listings')}
+                                className={`py-4 font-bold text-sm border-b-2 transition-colors ${activeTab === 'listings' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+                            >
+                                房源管理
+                            </button>
+                            <button 
+                                onClick={() => setActiveTab('wallet')}
+                                className={`py-4 font-bold text-sm border-b-2 transition-colors ${activeTab === 'wallet' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+                            >
+                                钱包/充值
+                            </button>
+                            <button 
+                                onClick={() => setActiveTab('settings')}
+                                className={`py-4 font-bold text-sm border-b-2 transition-colors ${activeTab === 'settings' ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+                            >
+                                账号设置
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* Content */}
+                    <main className="flex-1 max-w-6xl mx-auto w-full p-6">
+                        {activeTab === 'listings' ? (
+                            <ListingsPanel userId={user._id} onBalanceUpdate={(b) => setBalance(b)} />
+                        ) : activeTab === 'wallet' ? (
+                            <div className="space-y-6">
+                                {(stripeConfirming || stripeConfirmError) && (
+                                    <div className={`p-4 rounded-2xl border ${stripeConfirmError ? 'bg-red-50 border-red-200' : 'bg-blue-50 border-blue-200'}`}>
+                                        <div className="flex items-start justify-between gap-4">
+                                            <div className="min-w-0">
+                                                <div className={`font-bold ${stripeConfirmError ? 'text-red-700' : 'text-blue-800'}`}>
+                                                    {stripeConfirmError ? '入账确认失败' : '正在确认入账...'}
+                                                </div>
+                                                <div className={`text-sm mt-1 ${stripeConfirmError ? 'text-red-700' : 'text-blue-700'}`}>
+                                                    {stripeConfirmError
+                                                        ? stripeConfirmError
+                                                        : 'Stripe 支付成功后可能需要几秒同步，请稍等。'}
+                                                </div>
+                                                {stripeSessionId && (
+                                                    <div className="text-xs mt-2 text-gray-500 break-all">
+                                                        session_id: {stripeSessionId}
+                                                    </div>
+                                                )}
+                                            </div>
+                                            <div className="flex gap-2 flex-shrink-0">
+                                                {stripeConfirmError && stripeSessionId && (
+                                                    <button
+                                                        onClick={() => confirmStripeSession(stripeSessionId)}
+                                                        className="px-4 py-2 rounded-xl bg-red-600 text-white font-bold hover:bg-red-700"
+                                                    >
+                                                        重试入账
+                                                    </button>
+                                                )}
+                                                <button
+                                                    onClick={() => { setStripeConfirmError(''); setStripeSessionId(''); clearStripeParams(); }}
+                                                    className="px-4 py-2 rounded-xl bg-white border border-gray-200 text-gray-700 font-bold hover:bg-gray-50"
+                                                >
+                                                    关闭
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                )}
+                                {stripeSyncMsg && (
+                                    <div className="p-4 rounded-2xl border border-gray-200 bg-white text-sm text-gray-700">
+                                        {stripeSyncMsg}
+                                    </div>
+                                )}
+                                <div className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm">
+                                    <div className="flex items-center justify-between mb-4">
+                                        <h2 className="text-xl font-bold text-gray-800">钱包 / 充值（Stripe 测试）</h2>
+                                        <button
+                                            onClick={reconcileStripe}
+                                            disabled={stripeSyncing}
+                                            className="text-sm font-bold text-blue-600 hover:underline disabled:opacity-50"
+                                        >
+                                            {stripeSyncing ? '同步中...' : '同步Stripe订单'}
+                                        </button>
+                                    </div>
+                                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-end">
+                                        <div className="md:col-span-1">
+                                            <div className="text-sm text-gray-500 mb-1">当前余额</div>
+                                            <div className="text-3xl font-extrabold text-gray-900">€{balance}</div>
+                                        </div>
+                                        <div className="md:col-span-1">
+                                            <label className="block text-sm font-medium text-gray-700 mb-1">充值金额 (€)</label>
+                                            <input
+                                                type="number"
+                                                className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                                                value={topupAmount}
+                                                onChange={(e) => setTopupAmount(e.target.value)}
+                                                min="1"
+                                            />
+                                        </div>
+                                        <div className="md:col-span-1">
+                                            <button
+                                                onClick={handleTopUp}
+                                                disabled={topupLoading}
+                                                className="w-full py-3 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-700 disabled:opacity-50"
+                                            >
+                                                {topupLoading ? '充值中...' : '立即充值'}
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm">
+                                    <div className="flex items-center justify-between mb-4">
+                                        <h3 className="text-lg font-bold text-gray-800">充值/消费记录</h3>
+                                        <button onClick={fetchPayments} className="text-sm font-bold text-blue-600 hover:underline">刷新</button>
+                                    </div>
+                                    {paymentsLoading ? (
+                                        <div className="text-gray-500 py-8 text-center">加载中...</div>
+                                    ) : payments.length === 0 ? (
+                                        <div className="text-gray-500 py-8 text-center">暂无记录</div>
+                                    ) : (
+                                        <div className="overflow-x-auto">
+                                            <table className="min-w-full text-sm">
+                                                <thead>
+                                                    <tr className="text-left text-gray-500 border-b">
+                                                        <th className="py-2 pr-4">时间</th>
+                                                        <th className="py-2 pr-4">类型</th>
+                                                        <th className="py-2 pr-4">金额</th>
+                                                        <th className="py-2 pr-4">状态</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {payments.map(p => (
+                                                        <tr key={p._id} className="border-b last:border-b-0">
+                                                            <td className="py-2 pr-4 text-gray-600 whitespace-nowrap">{new Date(p.createdAt).toLocaleString()}</td>
+                                                            <td className="py-2 pr-4 font-medium text-gray-800">{p.type}</td>
+                                                            <td className={`py-2 pr-4 font-bold ${Number(p.amount) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                                                {Number(p.amount) >= 0 ? '+' : ''}{p.amount}€
+                                                            </td>
+                                                            <td className="py-2 pr-4 text-gray-600">{p.status}</td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        ) : activeTab === 'settings' ? (
+                            <div className="space-y-6">
+                                <div className="bg-white p-6 rounded-2xl border border-gray-100 shadow-sm">
+                                    <h2 className="text-xl font-bold text-gray-800 mb-4">账号信息</h2>
+                                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                        <div>
+                                            <label className="text-sm text-gray-500 mb-1 block">昵称</label>
+                                            <input
+                                                type="text"
+                                                className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                                                placeholder="填写昵称（展示给租客）"
+                                                value={profileForm.name}
+                                                onChange={(e) => setProfileForm(prev => ({ ...prev, name: e.target.value }))}
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="text-sm text-gray-500 mb-1 block">邮箱</label>
+                                            <input
+                                                type="email"
+                                                className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                                                placeholder="填写邮箱（用于登录）"
+                                                value={profileForm.email}
+                                                onChange={(e) => setProfileForm(prev => ({ ...prev, email: e.target.value }))}
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="text-sm text-gray-500 mb-1 block">微信号</label>
+                                            <input
+                                                type="text"
+                                                className="w-full px-4 py-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none"
+                                                placeholder="填写微信号（给租客联系）"
+                                                value={profileForm.wechatId}
+                                                onChange={(e) => setProfileForm(prev => ({ ...prev, wechatId: e.target.value }))}
+                                            />
+                                        </div>
+                                    </div>
+                                    <div className="mt-6 flex flex-col md:flex-row gap-3">
+                                        <button
+                                            onClick={async () => {
+                                                const payload = {
+                                                    name: String(profileForm.name || '').trim(),
+                                                    email: String(profileForm.email || '').trim(),
+                                                    wechatId: String(profileForm.wechatId || '').trim()
+                                                };
+                                                if (!payload.email) return alert('请填写邮箱');
+                                                if (!payload.wechatId) return alert('请填写微信号');
+                                                if (!payload.name) return alert('请填写昵称');
+                                                setProfileSaving(true);
+                                                try {
+                                                    const res = await api('/auth/me', 'PATCH', payload);
+                                                    const newUser = res?.data?.user;
+                                                    if (!newUser) throw new Error('返回数据异常');
+
+                                                    // 同步余额（后端返回 user 里也有 balance；但以现有 balance state 为准）
+                                                    newUser.balance = typeof newUser.balance === 'number' ? newUser.balance : balance;
+
+                                                    localStorage.setItem('user', JSON.stringify(newUser));
+                                                    if (typeof onUserUpdate === 'function') onUserUpdate(newUser);
+                                                    alert('保存成功');
+                                                } catch (e) {
+                                                    alert('保存失败：' + (e?.message || '未知错误'));
+                                                } finally {
+                                                    setProfileSaving(false);
+                                                }
+                                            }}
+                                            disabled={profileSaving}
+                                            className="px-6 py-3 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-700 disabled:opacity-50"
+                                        >
+                                            {profileSaving ? '保存中...' : '保存修改'}
+                                        </button>
+                                        <button
+                                            onClick={() => setProfileForm({ name: user.name || '', email: user.email || '', wechatId: user.wechatId || '' })}
+                                            disabled={profileSaving}
+                                            className="px-6 py-3 bg-gray-100 text-gray-700 font-bold rounded-xl hover:bg-gray-200 disabled:opacity-50"
+                                        >
+                                            取消
+                                        </button>
+                                        <a href="/index.html" className="px-6 py-3 bg-white border border-gray-200 text-gray-800 font-bold rounded-xl hover:bg-gray-50 text-center">
+                                            返回前台首页
+                                        </a>
+                                        <button onClick={onLogout} className="px-6 py-3 bg-red-50 text-red-600 font-bold rounded-xl hover:bg-red-100">退出登录</button>
+                                    </div>
+                                </div>
+                            </div>
+                        ) : (
+                            <>
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                            <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
+                                <h3 className="text-gray-500 text-sm mb-1">可用余额</h3>
+                                <p className="text-3xl font-bold text-gray-800">€{balance}</p>
+                                <button onClick={() => setActiveTab('wallet')} className="mt-4 w-full py-2 bg-blue-50 text-blue-600 rounded-lg text-sm font-bold hover:bg-blue-100">立即充值</button>
+                            </div>
+                            <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
+                                <h3 className="text-gray-500 text-sm mb-1">已解锁线索</h3>
+                                <p className="text-3xl font-bold text-gray-800">{leads.filter(l => l.isUnlocked).length}</p>
+                            </div>
+                            <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
+                                <h3 className="text-gray-500 text-sm mb-1">新线索 (待处理)</h3>
+                                <p className="text-3xl font-bold text-green-600">{leads.filter(l => !l.isUnlocked).length}</p>
+                            </div>
+                        </div>
+
+                        <h2 className="text-xl font-bold text-gray-800 mb-4">最新租客需求</h2>
+                        
+                        {loading ? (
+                            <p className="text-center py-10 text-gray-500">加载中...</p>
+                        ) : leads.length === 0 ? (
+                            <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-8 text-center">
+                                <div className="text-gray-800 font-bold text-lg mb-2">暂无租客线索</div>
+                                <div className="text-gray-500 text-sm mb-6">
+                                    线索由租客在“发布求租”入口提交。你可以先发布房源，或打开求租页创建测试数据。
+                                </div>
+                                <div className="flex gap-3 justify-center">
+                                    <a href="/tenant" className="px-6 py-3 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-700">打开发布求租页</a>
+                                    <button onClick={fetchLeads} className="px-6 py-3 bg-gray-100 text-gray-700 font-bold rounded-xl hover:bg-gray-200">刷新</button>
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="space-y-4">
+                                {leads.map(lead => (
+                                    <div key={lead._id} className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 hover:shadow-md transition-shadow">
+                                        <div className="flex flex-col md:flex-row justify-between gap-4">
+                                            <div className="flex-1">
+                                                <div className="flex items-center gap-2 mb-2">
+                                                    <span className="bg-blue-100 text-blue-700 text-xs font-bold px-2 py-1 rounded">
+                                                        预算: €{lead.budget || '面议'}
+                                                    </span>
+                                                    <span className="bg-gray-100 text-gray-600 text-xs px-2 py-1 rounded">
+                                                        入住: {lead.moveInDate ? new Date(lead.moveInDate).toLocaleDateString() : '随时'}
+                                                    </span>
+                                                    <span className="text-gray-400 text-xs">
+                                                        {new Date(lead.createdAt).toLocaleString()}
+                                                    </span>
+                                                </div>
+                                                <p className="text-gray-800 font-medium mb-3">{lead.requirement}</p>
+                                                
+                                                {/* 联系方式区域 */}
+                                                <div className={`p-3 rounded-xl border ${lead.isUnlocked ? 'bg-green-50 border-green-100' : (lead.reviewStatus !== 'approved' ? 'bg-yellow-50 border-yellow-200' : 'bg-gray-50 border-gray-200 border-dashed')}`}>
+                                                    {lead.isUnlocked ? (
+                                                        <div className="flex items-center gap-4 text-sm text-green-800">
+                                                            <span><span className="font-bold">微信:</span> {lead.wechatId}</span>
+                                                            {lead.phone && <span><span className="font-bold">电话:</span> {lead.phone}</span>}
+                                                        </div>
+                                                    ) : lead.reviewStatus !== 'approved' ? (
+                                                        <div className="flex items-center justify-between text-sm text-yellow-800">
+                                                            <span>该线索待审核（审核通过后才能付费解锁）</span>
+                                                            <div className="flex items-center gap-1 text-yellow-700 font-bold">
+                                                                <LucideIcon name="shield-alert" size={14} />
+                                                                待审核
+                                                            </div>
+                                                        </div>
+                                                    ) : (
+                                                        <div className="flex items-center justify-between text-sm text-gray-500">
+                                                            <span>联系方式已隐藏</span>
+                                                            <div className="flex items-center gap-1 text-orange-500">
+                                                                <LucideIcon name="lock" size={14} />
+                                                                需付费解锁
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            </div>
+
+                                            <div className="flex items-center">
+                                                {!lead.isUnlocked ? (
+                                                    <button 
+                                                        onClick={() => handleUnlock(lead._id)}
+                                                        disabled={lead.reviewStatus !== 'approved'}
+                                                        className="w-full md:w-auto px-6 py-3 bg-gradient-to-r from-orange-500 to-red-500 text-white font-bold rounded-xl shadow-lg hover:brightness-110 active:scale-95 transition-all whitespace-nowrap"
+                                                    >
+                                                        {lead.reviewStatus !== 'approved' ? '待审核' : '1€ 解锁联系方式'}
+                                                    </button>
+                                                ) : (
+                                                    <button disabled className="w-full md:w-auto px-6 py-3 bg-gray-100 text-gray-400 font-bold rounded-xl cursor-not-allowed">
+                                                        已解锁
+                                                    </button>
+                                                )}
+                                            </div>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                        </>
+                        )}
+                    </main>
+                </div>
+            );
+        };
+
+        const App = () => {
+            const [user, setUser] = useState(null);
+
+            useEffect(() => {
+                const storedToken = localStorage.getItem('token');
+                const storedUser = localStorage.getItem('user');
+                if (storedToken && storedUser) {
+                    setUser(JSON.parse(storedUser));
+                }
+            }, []);
+
+            const handleLogout = () => {
+                localStorage.removeItem('token');
+                localStorage.removeItem('user');
+                setUser(null);
+            };
+
+            return user ? <Dashboard user={user} onLogout={handleLogout} onUserUpdate={setUser} /> : <AuthPage onLogin={setUser} />;
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>

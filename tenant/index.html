@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>发布求租 | 里尔租房</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&display=swap');
+    body { font-family: 'Noto Sans SC', sans-serif; background-color: #F3F4F6; }
+  </style>
+</head>
+<body>
+  <div class="max-w-2xl mx-auto px-4 py-10">
+    <div class="flex items-center justify-between mb-6">
+      <a href="/index.html" class="text-sm font-bold text-blue-600 hover:underline">← 返回首页</a>
+      <a href="/landlord" class="text-sm font-bold text-gray-600 hover:underline">房东工作台</a>
+    </div>
+
+    <div class="bg-white rounded-2xl border border-gray-100 shadow-sm p-8">
+      <h1 class="text-2xl font-extrabold text-gray-900 mb-2">发布求租需求</h1>
+      <p class="text-gray-500 mb-8">提交后，房东可以付费解锁你的联系方式（演示流程）。</p>
+
+      <form id="leadForm" class="space-y-4">
+        <div>
+          <label class="block text-sm font-medium text-gray-700 mb-1">求租区域/要求 *</label>
+          <textarea id="requirement" required rows="4" class="w-full px-4 py-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none" placeholder="例：想找一大附近 Studio，包水电网..."></textarea>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">月租预算 (€)</label>
+            <input id="budget" type="text" class="w-full px-4 py-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none" placeholder="例：500-600" />
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">起租日期</label>
+            <input id="moveInDate" type="date" class="w-full px-4 py-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none" />
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">微信号 *</label>
+            <input id="wechatId" required type="text" class="w-full px-4 py-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none" placeholder="用于接收房东联系" />
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">手机号/邮箱（可选）</label>
+            <input id="contact" type="text" class="w-full px-4 py-3 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none" placeholder="电话或邮箱" />
+          </div>
+        </div>
+
+        <button id="submitBtn" type="submit" class="w-full py-3 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-700 transition-colors">
+          立即发布
+        </button>
+
+        <p id="status" class="text-sm text-gray-500"></p>
+      </form>
+    </div>
+  </div>
+
+  <script>
+    const API = 'http://127.0.0.1:3001/api/v1';
+    const form = document.getElementById('leadForm');
+    const statusEl = document.getElementById('status');
+    const btn = document.getElementById('submitBtn');
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      statusEl.textContent = '';
+      btn.disabled = true;
+      btn.textContent = '提交中...';
+
+      const requirement = document.getElementById('requirement').value.trim();
+      const budget = document.getElementById('budget').value.trim();
+      const moveInDate = document.getElementById('moveInDate').value;
+      const wechatId = document.getElementById('wechatId').value.trim();
+      const contact = document.getElementById('contact').value.trim();
+
+      const payload = {
+        requirement,
+        budget: budget || undefined,
+        moveInDate: moveInDate || undefined,
+        wechatId,
+      };
+      // 简单判断：包含 @ 视为邮箱，否则视为手机号
+      if (contact) {
+        if (contact.includes('@')) payload.email = contact;
+        else payload.phone = contact;
+      }
+
+      try {
+        const res = await fetch(`${API}/leads`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const json = await res.json();
+        if (!res.ok) throw new Error(json.message || '提交失败');
+
+        statusEl.className = 'text-sm text-green-600 font-bold';
+        statusEl.textContent = '发布成功！你可以让房东去“房东工作台-租客线索”查看。';
+        form.reset();
+      } catch (err) {
+        statusEl.className = 'text-sm text-red-600 font-bold';
+        statusEl.textContent = '发布失败：' + (err.message || '未知错误');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '立即发布';
+      }
+    });
+  </script>
+</body>
+</html>
+
+
+
+
+

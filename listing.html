@@ -1,0 +1,692 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>房源详情 | 里尔租房</title>
+    <!-- CDN（适配法国网络环境） -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&display=swap');
+        body { font-family: 'Noto Sans SC', sans-serif; background-color: #F3F4F6; }
+        /* Utilities (Tailwind CDN 不一定包含插件类，这里做兜底) */
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+        .line-clamp-1, .line-clamp-2, .line-clamp-3 { display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; }
+        .line-clamp-1 { -webkit-line-clamp: 1; }
+        .line-clamp-2 { -webkit-line-clamp: 2; }
+        .line-clamp-3 { -webkit-line-clamp: 3; }
+        @keyframes fadeInUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+        .animate-fade-in-up { animation: fadeInUp .18s ease-out; }
+        /* 给底部固定 CTA 预留“弹性”空间：包含 iOS 安全区，桌面端更克制 */
+        .content-pad-bottom { padding-bottom: calc(9.5rem + env(safe-area-inset-bottom)); }
+        @media (min-width: 1024px) { .content-pad-bottom { padding-bottom: 2.5rem; } }
+    </style>
+</head>
+<body>
+    <!-- 防呆：file:// 打开会导致接口请求失败 -->
+    <div id="protocol-warning" style="display:none; padding:16px; background:#FEF3C7; border-bottom:1px solid #F59E0B; color:#92400E; font-weight:700;">
+        检测到你正在用 <code>file://</code> 方式打开页面（会导致接口请求失败）。请用本地服务器访问：
+        <a href="http://localhost:3000/listing.html" style="text-decoration:underline; font-weight:900;">http://localhost:3000/listing.html?id=xxx</a>
+        <button id="open-local-btn" style="margin-left:12px; padding:6px 10px; border:1px solid #F59E0B; background:#fff; border-radius:8px; cursor:pointer; font-weight:900;">
+          一键打开
+        </button>
+    </div>
+    <script>
+      (function () {
+        try {
+          if (location.protocol === 'file:') {
+            var el = document.getElementById('protocol-warning');
+            if (el) el.style.display = 'block';
+            var btn = document.getElementById('open-local-btn');
+            if (btn) {
+              btn.addEventListener('click', function () {
+                // 保留 query 参数（id）
+                window.location.href = 'http://localhost:3000/listing.html' + (location.search || '');
+              });
+            }
+            // 自动跳转（避免用户总是双击文件）
+            setTimeout(function () {
+              try { window.location.href = 'http://localhost:3000/listing.html' + (location.search || ''); } catch (e) {}
+            }, 800);
+          }
+        } catch (e) {}
+      })();
+    </script>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+        const API_URL = 'http://127.0.0.1:3001/api/v1';
+
+        // --- Icon Component ---
+        const LucideIcon = ({ name, size = 24, className = '' }) => {
+            const ref = useRef(null);
+            useEffect(() => {
+                if (ref.current && lucide && lucide.createIcons) {
+                    const svg = lucide.icons[name]?.toSvg({ class: className, width: size, height: size });
+                    if(svg) ref.current.innerHTML = svg;
+                }
+            }, [name, size, className]);
+            return <span ref={ref} className="inline-flex items-center justify-center"></span>;
+        };
+
+        const ListingDetail = () => {
+            const [listing, setListing] = useState(null);
+            const [loading, setLoading] = useState(true);
+            const [error, setError] = useState(null);
+            const [activeImg, setActiveImg] = useState(0);
+            const [showContact, setShowContact] = useState(false);
+            const [listings, setListings] = useState([]);
+            const [listingsLoading, setListingsLoading] = useState(false);
+            const [refreshing, setRefreshing] = useState(false);
+            const [lightboxOpen, setLightboxOpen] = useState(false);
+            const [contactOpen, setContactOpen] = useState(false);
+            const [toast, setToast] = useState('');
+
+            const getAuthHeaders = () => {
+                try {
+                    const token = localStorage.getItem('token');
+                    return token ? { Authorization: `Bearer ${token}` } : {};
+                } catch (e) {
+                    return {};
+                }
+            };
+
+            useEffect(() => {
+                const params = new URLSearchParams(window.location.search);
+                const idFromQuery = params.get('id');
+                const idFromPath = (() => {
+                    try {
+                        const m = String(window.location.pathname || '').match(/[a-f0-9]{24}$/i);
+                        return m ? m[0] : null;
+                    } catch (e) {
+                        return null;
+                    }
+                })();
+                const id = idFromQuery || idFromPath;
+                console.log("🔍 [Init] 页面加载，房源ID:", id);
+
+                if (!id) {
+                    // 兜底：没提供 id，就加载房源列表让用户选择（避免 /listing 这种路径死路由）
+                    setLoading(false);
+                    fetchListingList();
+                    return;
+                }
+
+                // 纯真数据模式：直接请求后端 API
+                console.log("🌍 [API] 开始请求后端接口...");
+                fetchListing(id);
+            }, []);
+
+            const fetchListingList = async () => {
+                setError(null);
+                setListingsLoading(true);
+                try {
+                    const res = await fetch(`${API_URL}/listings`);
+                    const json = await res.json();
+                    const arr = json?.data?.listings;
+                    if (Array.isArray(arr)) {
+                        setListings(arr);
+                    } else {
+                        setError('无法获取房源列表（返回结构异常）');
+                    }
+                } catch (err) {
+                    setError('无法加载房源列表，请检查后端服务');
+                } finally {
+                    setListingsLoading(false);
+                }
+            };
+
+            const fetchListing = async (id) => {
+                try {
+                    const res = await fetch(`${API_URL}/listings/${id}`, { headers: getAuthHeaders() });
+                    console.log("📩 [API] 收到响应状态:", res.status);
+                    
+                    const json = await res.json().catch(() => ({}));
+                    if (json.status === 'success') {
+                        console.log("✅ [Success] 获取到数据:", json.data.listing);
+                        setListing(json.data.listing);
+                    } else {
+                        console.error("❌ [API Error] 业务逻辑错误:", json.message);
+                        const msg = json.message || '';
+                        setError(msg === 'No listing found' ? '房源不存在，或尚未通过管理员审核' : (msg || '房源不存在'));
+                    }
+                } catch (err) {
+                    console.error("❌ [Network Error] 网络请求失败:", err);
+                    setError('网络连接失败，请检查后端服务');
+                } finally {
+                    setLoading(false);
+                }
+            };
+
+            const deleteListing = async () => {
+                const params = new URLSearchParams(window.location.search);
+                const idFromQuery = params.get('id');
+                const idFromPath = (() => {
+                    try {
+                        const m = String(window.location.pathname || '').match(/[a-f0-9]{24}$/i);
+                        return m ? m[0] : null;
+                    } catch (e) {
+                        return null;
+                    }
+                })();
+                const id = idFromQuery || idFromPath;
+                if (!id) return;
+                if (!confirm('确定删除这个房源吗？此操作不可恢复。')) return;
+                try {
+                    const res = await fetch(`${API_URL}/listings/${id}`, {
+                        method: 'DELETE',
+                        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() }
+                    });
+                    const json = await res.json().catch(() => ({}));
+                    if (!res.ok) throw new Error(json.message || '删除失败');
+                    alert('删除成功');
+                    window.location.href = 'landlord.html';
+                } catch (e) {
+                    alert('删除失败：' + (e?.message || '未知错误'));
+                }
+            };
+
+            const refresh = async () => {
+                const params = new URLSearchParams(window.location.search);
+                const idFromQuery = params.get('id');
+                const idFromPath = (() => {
+                    try {
+                        const m = String(window.location.pathname || '').match(/[a-f0-9]{24}$/i);
+                        return m ? m[0] : null;
+                    } catch (e) {
+                        return null;
+                    }
+                })();
+                const id = idFromQuery || idFromPath;
+                if (!id) return;
+                setRefreshing(true);
+                setLoading(true);
+                await fetchListing(id);
+                setRefreshing(false);
+            };
+
+            if (loading) return (
+                <div className="min-h-screen flex flex-col items-center justify-center text-gray-500">
+                    <div className="w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mb-4"></div>
+                    <p>正在加载房源详情...</p>
+                </div>
+            );
+
+            // 审核态/驳回态：对房东/管理员预览更友好（public 仍然看不到未审核房源）
+            if (!loading && listing && listing.reviewStatus && listing.reviewStatus !== 'approved') {
+                const status = listing.reviewStatus;
+                const label = status === 'pending' ? '等待管理员审核' : status === 'rejected' ? '已被管理员驳回' : status;
+                const tip =
+                    status === 'pending'
+                        ? '房源已提交成功，审核通过后才会展示在前台列表并允许推广/收费操作。'
+                        : status === 'rejected'
+                            ? '管理员已驳回该房源，请根据备注修改后重新提交。'
+                            : '';
+
+                return (
+                    <div className="min-h-screen flex flex-col items-center justify-center p-4">
+                        <div className="w-full max-w-2xl bg-white rounded-2xl border border-gray-100 shadow-sm p-8">
+                            <div className="flex items-start gap-4">
+                                <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${status === 'pending' ? 'bg-yellow-50 text-yellow-700' : 'bg-red-50 text-red-700'}`}>
+                                    <LucideIcon name={status === 'pending' ? 'clock' : 'alert-triangle'} size={22} className={status === 'pending' ? 'text-yellow-700' : 'text-red-700'} />
+                                </div>
+                                <div className="flex-1">
+                                    <div className="text-xl font-extrabold text-gray-900">{label}</div>
+                                    <div className="text-gray-600 mt-2 leading-relaxed">{tip}</div>
+                                    {status === 'rejected' && (listing.reviewNote || listing.reviewNote === '') && (
+                                        <div className="mt-4 p-4 rounded-xl bg-red-50 border border-red-100">
+                                            <div className="text-sm font-bold text-red-700 mb-1">驳回备注</div>
+                                            <div className="text-sm text-red-700 whitespace-pre-wrap">{listing.reviewNote || '（管理员未填写备注）'}</div>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+
+                            <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-3">
+                                <div className="p-4 rounded-xl bg-gray-50 border border-gray-100">
+                                    <div className="text-xs text-gray-500">标题</div>
+                                    <div className="font-bold text-gray-900 mt-1 line-clamp-2">{listing.title || '未命名房源'}</div>
+                                </div>
+                                <div className="p-4 rounded-xl bg-gray-50 border border-gray-100">
+                                    <div className="text-xs text-gray-500">月租</div>
+                                    <div className="font-extrabold text-blue-600 mt-1">€{Number(listing.price) || 0}/月</div>
+                                </div>
+                                <div className="p-4 rounded-xl bg-gray-50 border border-gray-100">
+                                    <div className="text-xs text-gray-500">区域</div>
+                                    <div className="font-bold text-gray-900 mt-1">{listing.location || 'Lille'}</div>
+                                </div>
+                            </div>
+
+                            <div className="mt-6 flex flex-col sm:flex-row gap-3">
+                                <a href="landlord.html" target="_blank" className="flex-1 text-center px-6 py-3 bg-blue-600 text-white rounded-xl font-bold hover:bg-blue-700">
+                                    去房东后台查看/修改
+                                </a>
+                                <button onClick={refresh} className="flex-1 px-6 py-3 bg-gray-100 text-gray-800 rounded-xl font-bold hover:bg-gray-200">
+                                    {refreshing ? '刷新中...' : '刷新审核状态'}
+                                </button>
+                                <button onClick={deleteListing} className="flex-1 px-6 py-3 bg-red-50 border border-red-200 text-red-700 rounded-xl font-bold hover:bg-red-100">
+                                    删除该房源
+                                </button>
+                                <a href="index.html" className="flex-1 text-center px-6 py-3 bg-white border border-gray-200 text-gray-800 rounded-xl font-bold hover:bg-gray-50">
+                                    返回首页
+                                </a>
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
+
+            if (error || !listing) return (
+                <div className="min-h-screen flex flex-col items-center justify-center">
+                    <div className="text-red-500 mb-4 text-xl">⚠️ 无法加载房源</div>
+
+                    {listingsLoading ? (
+                        <p className="text-gray-600 mb-6">正在加载房源列表...</p>
+                    ) : listings.length > 0 ? (
+                        <div className="w-full max-w-xl bg-white rounded-2xl border border-gray-100 shadow-sm p-6">
+                            <p className="text-gray-600 mb-4">当前链接未带房源ID，请从下面选择一个房源进入详情页：</p>
+                            <div className="space-y-3">
+                                {listings.slice(0, 20).map((l) => (
+                                    <a
+                                        key={l._id}
+                                        href={`/listing?id=${encodeURIComponent(l._id)}`}
+                                        className="block p-4 rounded-xl border border-gray-100 hover:border-blue-200 hover:bg-blue-50 transition-colors"
+                                    >
+                                        <div className="flex items-start justify-between gap-4">
+                                            <div>
+                                                <div className="font-bold text-gray-900">{l.title || '未命名房源'}</div>
+                                                <div className="text-sm text-gray-500 mt-1">{l.location || 'Lille'}</div>
+                                            </div>
+                                            <div className="font-bold text-blue-600 whitespace-nowrap">€{l.price || 0}/月</div>
+                                        </div>
+                                    </a>
+                                ))}
+                            </div>
+                            <div className="mt-6 flex gap-3">
+                                <a href="index.html" className="flex-1 text-center px-6 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200">返回首页</a>
+                                <a href={`/listing?id=${encodeURIComponent(listings[0]._id)}`} className="flex-1 text-center px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">打开最新房源</a>
+                            </div>
+                        </div>
+                    ) : (
+                        <>
+                            <p className="text-gray-600 mb-6">{error || "未提供房源ID"}</p>
+                            <div className="flex gap-3">
+                                <a href="index.html" className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">返回首页</a>
+                                <a href="landlord.html" target="_blank" className="px-6 py-2 bg-gray-100 text-gray-700 rounded-lg hover:bg-gray-200">房东发布房源</a>
+                            </div>
+                        </>
+                    )}
+                </div>
+            );
+
+            // 格式化图片地址（不提供任何“假图”回退）
+            const images = (listing.images && listing.images.length > 0) 
+                ? listing.images.map(url => url.startsWith('http') ? url : `http://127.0.0.1:3001${url}`)
+                : [];
+
+            const safeTitle = listing.title || '未命名房源';
+            const safeLocation = listing.location || 'Lille';
+            const safePrice = Number(listing.price) || 0;
+            const createdAt = listing.createdAt ? new Date(listing.createdAt) : null;
+            const createdText = createdAt && !Number.isNaN(createdAt.getTime())
+                ? `${createdAt.getFullYear()}-${String(createdAt.getMonth() + 1).padStart(2, '0')}-${String(createdAt.getDate()).padStart(2, '0')}`
+                : '';
+            const listingId = listing._id || listing.id || '';
+
+            const showToast = (msg) => {
+                setToast(msg);
+                setTimeout(() => setToast(''), 1600);
+            };
+
+            const copyText = async (text) => {
+                try {
+                    if (navigator?.clipboard?.writeText) {
+                        await navigator.clipboard.writeText(text);
+                        showToast('已复制');
+                        return true;
+                    }
+                } catch (e) {}
+                try {
+                    const ta = document.createElement('textarea');
+                    ta.value = text;
+                    ta.style.position = 'fixed';
+                    ta.style.left = '-9999px';
+                    document.body.appendChild(ta);
+                    ta.select();
+                    document.execCommand('copy');
+                    document.body.removeChild(ta);
+                    showToast('已复制');
+                    return true;
+                } catch (e) {
+                    alert('复制失败，请手动复制');
+                    return false;
+                }
+            };
+
+            const shareLink = async () => {
+                const url = window.location.href;
+                try {
+                    if (navigator?.share) {
+                        await navigator.share({ title: safeTitle, text: `${safeTitle} - €${safePrice}/月`, url });
+                        return;
+                    }
+                } catch (e) {}
+                await copyText(url);
+            };
+
+            const prevImg = () => {
+                if (!images.length) return;
+                setActiveImg((i) => (i - 1 + images.length) % images.length);
+            };
+            const nextImg = () => {
+                if (!images.length) return;
+                setActiveImg((i) => (i + 1) % images.length);
+            };
+
+            const openContact = () => {
+                setShowContact(true);
+                setContactOpen(true);
+            };
+
+            return (
+                <div className="min-h-screen bg-[#F3F4F6]">
+                    {/* Toast */}
+                    {toast && (
+                        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[80] px-4 py-2 rounded-full bg-gray-900 text-white text-sm shadow-lg animate-fade-in-up">
+                            {toast}
+                        </div>
+                    )}
+
+                    {/* Topbar */}
+                    <nav className="bg-white/95 backdrop-blur border-b border-gray-100 sticky top-0 z-50">
+                        <div className="max-w-6xl mx-auto px-4 h-14 flex items-center justify-between">
+                            <a href="index.html" className="flex items-center gap-2 text-gray-600 hover:text-blue-600 transition-colors">
+                                <LucideIcon name="arrow-left" size={18} />
+                                <span className="font-medium">返回首页</span>
+                            </a>
+
+                            <div className="hidden md:flex items-center gap-2 text-gray-500 text-sm">
+                                <LucideIcon name="map-pin" size={16} className="text-gray-400" />
+                                <span className="line-clamp-1 max-w-[340px]">{safeLocation}</span>
+                            </div>
+
+                            <div className="flex items-center gap-2">
+                                <button onClick={() => copyText(window.location.href)} className="px-3 py-1.5 rounded-lg bg-gray-100 text-gray-700 hover:bg-gray-200 text-sm font-bold">
+                                    复制链接
+                                </button>
+                                <button onClick={shareLink} className="px-3 py-1.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 text-sm font-bold">
+                                    分享
+                                </button>
+                            </div>
+                        </div>
+                    </nav>
+
+                    <div className="max-w-6xl mx-auto px-4 py-6 content-pad-bottom">
+                        {/* Title block (mobile first) */}
+                        <div className="lg:hidden mb-4">
+                            <div className="text-2xl font-extrabold text-gray-900 leading-snug">{safeTitle}</div>
+                            <div className="mt-2 flex items-center gap-3 text-gray-500 text-sm">
+                                <span className="inline-flex items-center gap-1">
+                                    <LucideIcon name="map-pin" size={14} className="text-gray-400" />
+                                    {safeLocation}
+                                </span>
+                                {createdText && (
+                                    <span className="inline-flex items-center gap-1">
+                                        <LucideIcon name="calendar" size={14} className="text-gray-400" />
+                                        {createdText}
+                                    </span>
+                                )}
+                            </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                            {/* Left */}
+                            <div className="lg:col-span-2 space-y-4">
+                                {/* Gallery */}
+                                <div className="bg-white rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
+                                    <div className="relative aspect-video bg-gray-100">
+                                        {images.length > 0 ? (
+                                            <img
+                                                src={images[activeImg]}
+                                                alt={safeTitle}
+                                                className="w-full h-full object-cover cursor-zoom-in"
+                                                onClick={() => setLightboxOpen(true)}
+                                            />
+                                        ) : (
+                                            <div className="w-full h-full flex items-center justify-center text-gray-400 text-sm">暂无图片</div>
+                                        )}
+
+                                        {images.length > 1 && (
+                                            <>
+                                                <div className="absolute top-3 left-3 px-2 py-1 rounded-lg bg-black/55 text-white text-xs">
+                                                    {activeImg + 1}/{images.length}
+                                                </div>
+                                                <button onClick={prevImg} className="absolute left-3 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-black/45 hover:bg-black/60 text-white flex items-center justify-center">
+                                                    <LucideIcon name="chevron-left" size={18} className="text-white" />
+                                                </button>
+                                                <button onClick={nextImg} className="absolute right-3 top-1/2 -translate-y-1/2 w-10 h-10 rounded-full bg-black/45 hover:bg-black/60 text-white flex items-center justify-center">
+                                                    <LucideIcon name="chevron-right" size={18} className="text-white" />
+                                                </button>
+                                            </>
+                                        )}
+                                    </div>
+
+                                    {images.length > 1 && (
+                                        <div className="p-3 border-t border-gray-100">
+                                            <div className="flex gap-2 overflow-x-auto no-scrollbar">
+                                                {images.map((img, idx) => (
+                                                    <button
+                                                        key={idx}
+                                                        onClick={() => setActiveImg(idx)}
+                                                        className={`flex-shrink-0 w-24 h-16 rounded-lg overflow-hidden border-2 transition-all ${activeImg === idx ? 'border-blue-600' : 'border-transparent opacity-80 hover:opacity-100'}`}
+                                                        title={`第 ${idx + 1} 张`}
+                                                    >
+                                                        <img src={img} className="w-full h-full object-cover" />
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
+
+                                {/* Quick facts */}
+                                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                                    <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4">
+                                        <div className="text-xs text-gray-500">月租</div>
+                                        <div className="mt-1 text-2xl font-extrabold text-blue-600">€{safePrice}<span className="text-sm text-gray-500 font-bold">/月</span></div>
+                                    </div>
+                                    <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4">
+                                        <div className="text-xs text-gray-500">区域</div>
+                                        <div className="mt-1 font-extrabold text-gray-900 line-clamp-2">{safeLocation}</div>
+                                    </div>
+                                    <div className="bg-white rounded-2xl border border-gray-100 shadow-sm p-4">
+                                        <div className="text-xs text-gray-500">标签</div>
+                                        <div className="mt-1 font-extrabold text-gray-900">{(listing.tags || []).length || 0} 个</div>
+                                    </div>
+                                </div>
+
+                                {/* Description */}
+                                <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-100">
+                                    <div className="flex items-center justify-between">
+                                        <h2 className="text-lg font-extrabold text-gray-900">房源描述</h2>
+                                        {listingId && (
+                                            <div className="text-xs text-gray-400">编号：{String(listingId).slice(-6)}</div>
+                                        )}
+                                    </div>
+                                    <div className="mt-4 text-gray-700 leading-relaxed whitespace-pre-wrap">
+                                        {listing.description || "房东暂未填写详细描述。"}
+                                    </div>
+                                </div>
+
+                                {/* Tags */}
+                                <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-100">
+                                    <h3 className="text-lg font-extrabold text-gray-900">设施标签</h3>
+                                    <div className="mt-4 flex flex-wrap gap-2">
+                                        {(listing.tags || []).length ? (listing.tags || []).map((tag, i) => (
+                                            <span key={i} className="px-3 py-1.5 bg-blue-50 text-blue-700 text-sm rounded-xl font-bold border border-blue-100">
+                                                {tag}
+                                            </span>
+                                        )) : (
+                                            <div className="text-gray-500 text-sm">暂无标签</div>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Right */}
+                            <div className="lg:col-span-1">
+                                <div className="bg-white rounded-2xl p-6 shadow-lg border border-gray-100 sticky top-20">
+                                    <div className="hidden lg:block">
+                                        <h1 className="text-2xl font-extrabold text-gray-900 leading-snug">{safeTitle}</h1>
+                                        <div className="mt-2 flex items-center gap-2 text-gray-500 text-sm">
+                                            <LucideIcon name="map-pin" size={16} className="text-gray-400" />
+                                            <span className="line-clamp-2">{safeLocation}</span>
+                                        </div>
+                                        {createdText && (
+                                            <div className="mt-2 flex items-center gap-2 text-gray-500 text-sm">
+                                                <LucideIcon name="calendar" size={16} className="text-gray-400" />
+                                                <span>发布于 {createdText}</span>
+                                            </div>
+                                        )}
+                                    </div>
+
+                                    <div className="mt-4 flex items-baseline gap-1">
+                                        <span className="text-4xl font-extrabold text-blue-600">€{safePrice}</span>
+                                        <span className="text-gray-500 font-bold">/月</span>
+                                    </div>
+
+                                    <div className="mt-5 bg-gray-50 rounded-2xl p-4 flex items-center gap-4">
+                                        <div className="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center text-blue-700 font-extrabold text-lg">
+                                            {listing.landlord?.name?.[0]?.toUpperCase() || "L"}
+                                        </div>
+                                        <div className="min-w-0">
+                                            <p className="font-extrabold text-gray-900 line-clamp-1">{listing.landlord?.name || "认证房东"}</p>
+                                            <p className="text-xs text-gray-500 mt-0.5">实名认证 · 担保交易</p>
+                                        </div>
+                                    </div>
+
+                                    <div className="mt-5 space-y-2">
+                                        <button
+                                            onClick={openContact}
+                                            className="w-full py-3 bg-blue-600 text-white font-extrabold rounded-xl shadow hover:bg-blue-700 active:scale-[0.99] flex items-center justify-center gap-2"
+                                        >
+                                            <LucideIcon name="message-circle" size={20} className="text-white" />
+                                            联系房东（微信）
+                                        </button>
+                                        <div className="grid grid-cols-2 gap-2">
+                                            <button onClick={() => copyText(window.location.href)} className="py-2.5 bg-gray-100 text-gray-800 font-bold rounded-xl hover:bg-gray-200">
+                                                复制链接
+                                            </button>
+                                            <button onClick={shareLink} className="py-2.5 bg-white border border-gray-200 text-gray-800 font-bold rounded-xl hover:bg-gray-50">
+                                                分享
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    <p className="text-xs text-gray-400 text-center mt-4">
+                                        温馨提示：签约前请勿支付大额定金，建议实地或视频看房。
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Mobile sticky CTA */}
+                    <div className="lg:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 backdrop-blur border-t border-gray-200 p-3">
+                        <div className="max-w-6xl mx-auto flex items-center gap-3">
+                            <div className="flex-1 min-w-0">
+                                <div className="text-xs text-gray-500 line-clamp-1">{safeTitle}</div>
+                                <div className="text-lg font-extrabold text-blue-600">€{safePrice}<span className="text-xs text-gray-500 font-bold">/月</span></div>
+                            </div>
+                            <button onClick={openContact} className="px-5 py-3 rounded-xl bg-blue-600 text-white font-extrabold shadow hover:bg-blue-700">
+                                联系房东
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* Contact Modal */}
+                    {contactOpen && (
+                        <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
+                            <div className="absolute inset-0 bg-black/60" onClick={() => setContactOpen(false)}></div>
+                            <div className="relative w-full max-w-md bg-white rounded-2xl shadow-2xl p-6 animate-fade-in-up">
+                                <button onClick={() => setContactOpen(false)} className="absolute top-3 right-3 w-9 h-9 rounded-full bg-gray-100 hover:bg-gray-200 flex items-center justify-center">
+                                    <LucideIcon name="x" size={18} className="text-gray-700" />
+                                </button>
+                                <div className="text-lg font-extrabold text-gray-900">联系房东（微信）</div>
+                                <div className="text-gray-500 text-sm mt-1">建议备注：里尔租房网看到的</div>
+
+                                <div className="mt-5 bg-green-50 border border-green-200 rounded-2xl p-4 text-center">
+                                    <div className="text-sm text-green-800 mb-2">微信号</div>
+                                    <div className="text-2xl font-extrabold text-green-700 select-all">
+                                        {listing.landlord?.wechatId || "暂无微信号"}
+                                    </div>
+                                    <div className="mt-3 grid grid-cols-2 gap-2">
+                                        <button
+                                            onClick={() => copyText(listing.landlord?.wechatId || '')}
+                                            disabled={!listing.landlord?.wechatId}
+                                            className="py-2.5 rounded-xl bg-green-600 text-white font-extrabold hover:bg-green-700 disabled:opacity-50"
+                                        >
+                                            复制微信号
+                                        </button>
+                                        <button onClick={() => setContactOpen(false)} className="py-2.5 rounded-xl bg-white border border-gray-200 text-gray-800 font-bold hover:bg-gray-50">
+                                            关闭
+                                        </button>
+                                    </div>
+                                </div>
+
+                                <div className="mt-4 text-xs text-gray-400 leading-relaxed">
+                                    提醒：不要提前支付大额定金；建议视频看房或签约前确认房东身份。
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Lightbox */}
+                    {lightboxOpen && images.length > 0 && (
+                        <div className="fixed inset-0 z-[75] bg-black/90 flex flex-col">
+                            <div className="flex items-center justify-between p-4 text-white">
+                                <div className="text-sm opacity-90">{activeImg + 1}/{images.length}</div>
+                                <div className="text-sm font-bold line-clamp-1 max-w-[70%]">{safeTitle}</div>
+                                <button onClick={() => setLightboxOpen(false)} className="w-10 h-10 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center">
+                                    <LucideIcon name="x" size={20} className="text-white" />
+                                </button>
+                            </div>
+                            <div className="flex-1 flex items-center justify-center px-4">
+                                <button onClick={prevImg} className="hidden sm:flex w-12 h-12 rounded-full bg-white/10 hover:bg-white/20 items-center justify-center mr-3">
+                                    <LucideIcon name="chevron-left" size={22} className="text-white" />
+                                </button>
+                                <img src={images[activeImg]} className="max-h-[75vh] w-auto max-w-full object-contain rounded-lg" />
+                                <button onClick={nextImg} className="hidden sm:flex w-12 h-12 rounded-full bg-white/10 hover:bg-white/20 items-center justify-center ml-3">
+                                    <LucideIcon name="chevron-right" size={22} className="text-white" />
+                                </button>
+                            </div>
+                            <div className="p-3 border-t border-white/10">
+                                <div className="flex gap-2 overflow-x-auto no-scrollbar">
+                                    {images.map((img, idx) => (
+                                        <button
+                                            key={idx}
+                                            onClick={() => setActiveImg(idx)}
+                                            className={`flex-shrink-0 w-20 h-14 rounded-lg overflow-hidden border-2 ${activeImg === idx ? 'border-blue-400' : 'border-transparent opacity-70 hover:opacity-100'}`}
+                                        >
+                                            <img src={img} className="w-full h-full object-cover" />
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<ListingDetail />);
+    </script>
+</body>
+</html>

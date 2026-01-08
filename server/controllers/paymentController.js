@@ -2,12 +2,36 @@ const Landlord = require('../models/Landlord');
 const Payment = require('../models/Payment');
 const Stripe = require('stripe');
 
+function isProdLike() {
+  const env = String(process.env.NODE_ENV || '').toLowerCase();
+  if (env === 'production') return true;
+
+  // Heuristic: if WEB_BASE_URL points to a public domain, treat as production-like even if NODE_ENV not set.
+  const web = String(process.env.WEB_BASE_URL || '').trim().toLowerCase();
+  if (!web) return false;
+  const isLocal =
+    web.includes('localhost') ||
+    web.includes('127.0.0.1') ||
+    web.includes('0.0.0.0') ||
+    // common private LAN ranges (still not "public production")
+    web.includes('://192.168.') ||
+    web.includes('://10.') ||
+    web.includes('://172.16.') ||
+    web.includes('://172.17.') ||
+    web.includes('://172.18.') ||
+    web.includes('://172.19.') ||
+    web.includes('://172.2') || // 172.20-172.29
+    web.includes('://172.3'); // 172.30-172.31
+  return !isLocal;
+}
+
 function validateStripeKey(raw) {
   if (!raw) return { ok: false, reason: 'missing' };
   const key = String(raw).trim();
   if (!key) return { ok: false, reason: 'missing' };
   if (key === 'sk_test_xxx' || key === 'sk_live_xxx' || key.includes('xxx')) return { ok: false, reason: 'placeholder' };
   if (!/^sk_(test|live)_[A-Za-z0-9]+$/.test(key)) return { ok: false, reason: 'format' };
+  if (isProdLike() && key.startsWith('sk_test_')) return { ok: false, reason: 'test_in_prod' };
   return { ok: true, key };
 }
 
@@ -91,7 +115,9 @@ exports.createStripeCheckoutSession = async (req, res) => {
       const msg =
         v.reason === 'missing'
           ? 'Stripe 未配置：请在 server/.env 设置 STRIPE_SECRET_KEY'
-          : 'Stripe 密钥无效：请检查 server/.env 的 STRIPE_SECRET_KEY（必须是 sk_test_...，且不要用 pk_test_）';
+          : v.reason === 'test_in_prod'
+            ? 'Stripe 生产环境禁止使用测试密钥：请在 server/.env 设置 STRIPE_SECRET_KEY=sk_live_...（并配置对应 live 的 STRIPE_WEBHOOK_SECRET）'
+            : 'Stripe 密钥无效：请检查 server/.env 的 STRIPE_SECRET_KEY（必须是 sk_test_... 或 sk_live_...；不要用 pk_...）';
       return res.status(400).json({ status: 'fail', message: msg });
     }
 
@@ -156,7 +182,7 @@ exports.createStripeCheckoutSession = async (req, res) => {
     if (err?.type === 'StripeAuthenticationError') {
       return res.status(400).json({
         status: 'fail',
-        message: 'Stripe 密钥无效：请检查 server/.env 的 STRIPE_SECRET_KEY（必须是 sk_test_...，且不要用 pk_test_）'
+        message: 'Stripe 密钥无效：请检查 server/.env 的 STRIPE_SECRET_KEY（必须是 sk_test_... 或 sk_live_...；不要用 pk_...）'
       });
     }
     return res.status(400).json({ status: 'fail', message: err?.message || String(err) });
@@ -237,7 +263,9 @@ exports.confirmStripeCheckoutSession = async (req, res) => {
       const msg =
         v.reason === 'missing'
           ? 'Stripe 未配置：请在 server/.env 设置 STRIPE_SECRET_KEY'
-          : 'Stripe 密钥无效：请检查 server/.env 的 STRIPE_SECRET_KEY（必须是 sk_test_...，且不要用 pk_test_）';
+          : v.reason === 'test_in_prod'
+            ? 'Stripe 生产环境禁止使用测试密钥：请在 server/.env 设置 STRIPE_SECRET_KEY=sk_live_...（并配置对应 live 的 STRIPE_WEBHOOK_SECRET）'
+            : 'Stripe 密钥无效：请检查 server/.env 的 STRIPE_SECRET_KEY（必须是 sk_test_... 或 sk_live_...；不要用 pk_...）';
       return res.status(400).json({ status: 'fail', message: msg });
     }
 
@@ -306,7 +334,7 @@ exports.confirmStripeCheckoutSession = async (req, res) => {
     if (err?.type === 'StripeAuthenticationError') {
       return res.status(400).json({
         status: 'fail',
-        message: 'Stripe 密钥无效：请检查 server/.env 的 STRIPE_SECRET_KEY（必须是 sk_test_...，且不要用 pk_test_）'
+        message: 'Stripe 密钥无效：请检查 server/.env 的 STRIPE_SECRET_KEY（必须是 sk_test_... 或 sk_live_...；不要用 pk_...）'
       });
     }
     return res.status(400).json({ status: 'fail', message: err?.message || String(err) });
@@ -322,7 +350,9 @@ exports.reconcileStripeDeposits = async (req, res) => {
       const msg =
         v.reason === 'missing'
           ? 'Stripe 未配置：请在 server/.env 设置 STRIPE_SECRET_KEY'
-          : 'Stripe 密钥无效：请检查 server/.env 的 STRIPE_SECRET_KEY（必须是 sk_test_...，且不要用 pk_test_）';
+          : v.reason === 'test_in_prod'
+            ? 'Stripe 生产环境禁止使用测试密钥：请在 server/.env 设置 STRIPE_SECRET_KEY=sk_live_...（并配置对应 live 的 STRIPE_WEBHOOK_SECRET）'
+            : 'Stripe 密钥无效：请检查 server/.env 的 STRIPE_SECRET_KEY（必须是 sk_test_... 或 sk_live_...；不要用 pk_...）';
       return res.status(400).json({ status: 'fail', message: msg });
     }
 
@@ -426,7 +456,7 @@ exports.reconcileStripeDeposits = async (req, res) => {
     if (err?.type === 'StripeAuthenticationError') {
       return res.status(400).json({
         status: 'fail',
-        message: 'Stripe 密钥无效：请检查 server/.env 的 STRIPE_SECRET_KEY（必须是 sk_test_...，且不要用 pk_test_）'
+        message: 'Stripe 密钥无效：请检查 server/.env 的 STRIPE_SECRET_KEY（必须是 sk_test_... 或 sk_live_...；不要用 pk_...）'
       });
     }
     return res.status(400).json({ status: 'fail', message: err?.message || String(err) });

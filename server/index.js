@@ -27,6 +27,8 @@ app.get('/api/v1/health', (req, res) => {
   const state = mongoose.connection.readyState; // 0=disconnected,1=connected,2=connecting,3=disconnecting
   const sk = String(process.env.STRIPE_SECRET_KEY || '');
   const stripeMode = sk.startsWith('sk_live_') ? 'live' : sk.startsWith('sk_test_') ? 'test' : 'unknown';
+  const webBase = String(process.env.WEB_BASE_URL || '');
+  const nodeEnv = String(process.env.NODE_ENV || '');
   res.status(200).json({
     status: 'success',
     data: {
@@ -36,7 +38,9 @@ app.get('/api/v1/health', (req, res) => {
       stripe: {
         configured: Boolean(process.env.STRIPE_SECRET_KEY),
         mode: stripeMode,
-        webhookConfigured: Boolean(process.env.STRIPE_WEBHOOK_SECRET)
+        webhookConfigured: Boolean(process.env.STRIPE_WEBHOOK_SECRET),
+        env: nodeEnv || null,
+        webBaseUrl: webBase || null
       },
       mongo: {
         uri: process.env.DATABASE ? 'from_env' : 'default_local',
